@@ -51,6 +51,17 @@ for (const chain of enabledChains) {
 }
 
 export const networks = isGoerli ? goerliNetworks : mainnetNetworks
+export const CoingeckoApiKey = process.env.COINGECKO_API_KEY || ''
+
+export const NativeTokenPerChainSlug: Record<string, string> = {
+  ethereum: 'ETH',
+  optimism: 'ETH',
+  arbitrum: 'ETH',
+  polygon: 'MATIC',
+  gnosis: 'ETH',
+  nova: 'ETH',
+  base: 'ETH'
+}
 
 // TODO: maybe move this to core config?
 export const transferTimes = {

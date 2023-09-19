@@ -7,13 +7,13 @@ import wait from 'wait'
 import { mainnet as addresses } from '@hop-protocol/core/addresses'
 import l2BridgeAbi from '@hop-protocol/core/abi/generated/L2_Bridge.json'
 import l1BridgeAbi from '@hop-protocol/core/abi/generated/L1_Bridge.json'
-import { enabledChains, enabledTokens, rpcUrls, isGoerli, integrations } from './config'
+import { enabledChains, enabledTokens, rpcUrls, isGoerli, integrations, NativeTokenPerChainSlug } from './config'
 import { getTokenDecimals } from './utils/getTokenDecimals'
 import { chainIdToSlug } from './utils/chainIdToSlug'
 import { chainSlugToName } from './utils/chainSlugToName'
 import { chainSlugToId } from './utils/chainSlugToId'
 import { populateTransfer } from './utils/populateTransfer'
-import { getPriceHistory } from './price'
+import { getPriceByTimestamp, getPriceHistory } from './price'
 import {
   fetchTransfers,
   fetchTransfersForTransferId,
@@ -26,6 +26,7 @@ import {
 import { getPreRegenesisBondEvent, bridgeAbi } from './preregenesis'
 import { populateData } from './populateData'
 import { cache } from './cache'
+import fetch from 'isomorphic-fetch'
 
 const cacheDurationMs = isGoerli ? 60 * 1000 : 6 * 60 * 60 * 1000
 
@@ -1136,6 +1137,12 @@ export class TransferStats {
       let token = ''
       let bonded = false
       let bondTransactionHash = ''
+      let bondGasUsed = BigNumber.from(0)
+      let bondGasPrice = BigNumber.from(0)
+      let bondL1GasCost = BigNumber.from(0)
+      let bondGasCost = BigNumber.from(0)
+      let bondNativeTokenPriceUsd = 0
+      let bondTotalCostUsd = 0
       if (receipt) {
         const block = await provider.getBlock(receipt.blockNumber)
         if (!block) {
@@ -1180,9 +1187,9 @@ export class TransferStats {
               deadline = Number(decoded?.args?.deadline.toString())
             }
             for (const _token of enabledTokens) {
-              const _addreses = addresses?.bridges?.[_token]?.[sourceChainSlug]
+              const _addresses = addresses?.bridges?.[_token]?.[sourceChainSlug]
               if (
-                _addreses?.l1Bridge?.toLowerCase() === log.address?.toLowerCase()
+                _addresses?.l1Bridge?.toLowerCase() === log.address?.toLowerCase()
               ) {
                 token = _token
               }
@@ -1205,15 +1212,27 @@ export class TransferStats {
             if (!bridgeAddress) {
               throw new Error('bridge address not found')
             }
-            const _provider = new providers.StaticJsonRpcProvider(rpcUrls[destinationChainSlug])
-            const contract = new Contract(bridgeAddress, bridgeAbi, _provider)
-            const logs = await contract.queryFilter(
-              contract.filters.WithdrawalBonded(transferId)
-            )
-            if (logs.length === 1) {
+            const withdrawalBonded = await fetchTransferBonds(destinationChainSlug, [transferId])
+            if (withdrawalBonded.length !== 0) {
               bonded = true
-              bondTransactionHash = logs[0].transactionHash
+              bondTransactionHash = withdrawalBonded[0].transactionHash
+            } else {
+              throw new Error('bond not found')
             }
+
+            // Get bond gas data
+            const _provider = new providers.StaticJsonRpcProvider(rpcUrls[destinationChainSlug])
+            const bondReceipt = await this.getTransactionReceipt(_provider, bondTransactionHash)
+            const nativeToken = NativeTokenPerChainSlug[destinationChainSlug]
+            bondGasUsed = bondReceipt.gasUsed
+            bondGasPrice = bondReceipt.effectiveGasPrice
+            bondL1GasCost = await this.getL1GasCost(destinationChainSlug, bondTransactionHash)
+            bondGasCost = (BigNumber.from(bondGasUsed).mul(bondGasPrice)).add(bondL1GasCost)
+
+            const decimals = getTokenDecimals(nativeToken)
+            const bondGasCostFormatted: string = formatUnits(bondGasCost, decimals)
+            bondNativeTokenPriceUsd = await getPriceByTimestamp(nativeToken, timestamp)
+            bondTotalCostUsd = Number(bondGasCostFormatted) * bondNativeTokenPriceUsd
           } catch (err: any) {
             console.error('getTransferStatusForTxHash: queryFilter error:', err)
           }
@@ -1238,10 +1257,38 @@ export class TransferStats {
           bonderFeeFormatted,
           amount,
           amountFormatted,
-          token
+          token,
+          bondGasUsed,
+          bondGasPrice,
+          bondL1GasCost,
+          bondGasCost,
+          bondNativeTokenPriceUsd,
+          bondTotalCostUsd
         }
       }
     }
+  }
+
+  static async getL1GasCost (chainSlug: string, txHash: string): Promise<BigNumber> {
+    if (chainSlug !== 'optimism' && chainSlug !== 'base') {
+      return BigNumber.from(0)
+    }
+
+    const rpcUrl = rpcUrls[chainSlug]
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'eth_getTransactionReceipt',
+        params: [txHash],
+        id: 1
+      })
+    })
+    const json = await res.json()
+    return BigNumber.from(json.result.l1Fee)
   }
 }
 
