@@ -1,3 +1,7 @@
+Notice: Explorer has been moved to monorepo [https://github.com/hop-protocol/hop](https://github.com/hop-protocol/hop)
+
+---
+
 # Hop Explorer
 
 > A simple explorer for Hop transfers
